@@ -90,7 +90,7 @@ void print_help()
 * \param output the resultant aligned source PointCloud
 * \param final_transform the resultant transform between source and target
 */
-void pairAlign(const PointCloud::Ptr cloud_src, const PointCloud::Ptr cloud_tgt, PointCloud::Ptr output, Eigen::Matrix4f &final_transform, bool downsample = false)
+void pairAlign(const PointCloud::Ptr cloud_src, const PointCloud::Ptr cloud_tgt, Eigen::Matrix4f &final_transform, bool downsample = false)
 {
 	//
 	// Downsample for consistency and speed
@@ -151,11 +151,9 @@ void pairAlign(const PointCloud::Ptr cloud_src, const PointCloud::Ptr cloud_tgt,
 	reg.setInputSource(points_with_normals_src);
 	reg.setInputTarget(points_with_normals_tgt);
 
-
-
 	//
 	// Run the same optimization in a loop and visualize the results
-	Eigen::Matrix4f Ti = Eigen::Matrix4f::Identity(), prev, targetToSource;
+	Eigen::Matrix4f Ti = Eigen::Matrix4f::Identity(), prev;
 	PointCloudWithNormals::Ptr reg_result = points_with_normals_src;
 	reg.setMaximumIterations(2);
 	for (int i = 0; i < 30; ++i)
@@ -181,18 +179,7 @@ void pairAlign(const PointCloud::Ptr cloud_src, const PointCloud::Ptr cloud_tgt,
 		prev = reg.getLastIncrementalTransformation();
 	}
 
-	//
-	// Get the transformation from target to source
-	targetToSource = Ti.inverse();
-
-	//
-	// Transform target back in source frame
-	pcl::transformPointCloud(*cloud_tgt, *output, targetToSource);
-
-	//add the source to the transformed target
-	*output += *cloud_src;
-
-	final_transform = targetToSource;
+	final_transform = Ti.inverse();
 }
 
 
@@ -200,12 +187,10 @@ int main(int argc, char** argv)
 {
 	string dir_name;
 	vector<string> file_names;
-	float dist = 0.0;
 
 	for (int i = 1; i < argc; i++)
 	{
 		if ((strcmp(argv[i], "-f") == 0) && (i < (argc - 1))) { dir_name = argv[++i]; }
-		else if ((strcmp(argv[i], "-d") == 0) && (i < (argc - 1))) { dist = atof(argv[++i]); }
 		else if (strcmp(argv[i], "-h") == 0) { print_help(); }
 	}
 
@@ -220,15 +205,19 @@ int main(int argc, char** argv)
 
 	pcl::PointCloud<PointT>::Ptr prev_cloud(new pcl::PointCloud<PointT>);
 	pcl::PointCloud<PointT>::Ptr new_cloud(new pcl::PointCloud<PointT>);
-	pcl::PointCloud<PointT>::Ptr temp(new pcl::PointCloud<PointT>);
 	pcl::PointCloud<PointT>::Ptr result(new pcl::PointCloud<PointT>);
 	pcl::PointCloud<PointT>::Ptr dest_cloud(new pcl::PointCloud<PointT>);
 	pcl::PointCloud<PointT>::Ptr final_cloud(new pcl::PointCloud<PointT>);
 
-	Eigen::Matrix4f GlobalTransform = Eigen::Matrix4f::Identity(), pairTransform, newTransform;
+	Eigen::Matrix4f GlobalTransform = Eigen::Matrix4f::Identity(), pairTransform;
+	boost::posix_time::ptime start_t;
 
 	for (int i = 0; i < file_names.size(); i++) {
-		cerr << i << endl;
+		//handle time
+		boost::filesystem::path path_name(file_names[i]);
+
+		boost::posix_time::ptime t = boost::posix_time::from_iso_string(path_name.filename().string().substr(6, 22));//image timestamp
+
 		if (pcl::io::loadPCDFile<PointT>(file_names[i], *new_cloud) == -1) {
 			PCL_ERROR("Couldn't read file test_pcd.pcd \n");
 			return (-1);
@@ -238,23 +227,22 @@ int main(int argc, char** argv)
 		pcl::removeNaNFromPointCloud(*new_cloud, *new_cloud, indices);
 
 		if (i == 0) {
+			start_t = t;
 			*dest_cloud = *new_cloud;
 			*prev_cloud = *new_cloud;
+			boost::posix_time::time_duration td(t - start_t);
+			cerr << "Image " << i << " t=" << td.total_microseconds() << endl;
+			cerr << Eigen::Matrix4f::Identity() << endl;
 			continue;
 		}
 
-		pairAlign(prev_cloud, new_cloud, temp, pairTransform, true);
+		pairAlign(prev_cloud, new_cloud, pairTransform, true);
 
-		cerr << pairTransform << endl << endl;
-
-//		newTransform.setIdentity();
-//		newTransform(1, 3) = pairTransform(1, 3);		
-		newTransform = pairTransform;
-		newTransform(0, 3) = 0.0;
-		newTransform(2, 3) = 0.0;
+//		pairTransform(0, 3) = 0.0;
+//		pairTransform(2, 3) = 0.0;
 
 		//update the global transform
-		GlobalTransform = GlobalTransform * newTransform;
+		GlobalTransform = GlobalTransform * pairTransform;
 
 		//transform current pair into the global transform
 		pcl::transformPointCloud(*new_cloud, *result, GlobalTransform);
@@ -262,16 +250,21 @@ int main(int argc, char** argv)
 		*prev_cloud = *new_cloud;
 
 		*dest_cloud += *result;
+
+		boost::posix_time::time_duration td(t - start_t);
+
+		cerr << "Image " << i << " t=" << td.total_microseconds() << endl;
+		cerr << pairTransform << endl;
 	}
 
 	pcl::VoxelGrid<PointT> sor;
 	sor.setInputCloud(dest_cloud);
-	sor.setLeafSize(0.001f, 0.001f, 0.001f);
+	sor.setLeafSize(0.05f, 0.05f, 0.05f);
 	sor.filter(*final_cloud);
 
 	pcl::visualization::PCLVisualizer viewer("Simple Cloud Viewer");
 	//  viewer.addCoordinateSystem(1.0);
-	viewer.setCameraPosition(0.0, 0.0, -3.0, 0.0, -1.0, 0.0);
+	viewer.setCameraPosition(0.0, 0.0, -5.0, 0.0, -1.0, 0.0);
 
 	pcl::visualization::PointCloudColorHandlerRGBField<PointT> color_h(final_cloud);
 	if (!viewer.updatePointCloud<PointT>(final_cloud, color_h))
